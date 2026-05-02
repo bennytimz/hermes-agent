@@ -2440,50 +2440,53 @@ class AIAgent:
         # Check if there's any non-whitespace content remaining
         return bool(cleaned.strip())
     
-    def _strip_think_blocks(self, content: str) -> str:
-        """Remove reasoning/thinking blocks from content, returning only visible text.
+    @staticmethod
+    def _strip_tag_with_nesting(content: str, tag: str) -> str:
+        open_re = re.compile(rf"<{tag}\b[^>]*>", re.IGNORECASE)
+        close_re = re.compile(rf"</{tag}>", re.IGNORECASE)
+        events: list[tuple[int, int, str]] = []
+        for m in open_re.finditer(content):
+            events.append((m.start(), m.end(), "open"))
+        for m in close_re.finditer(content):
+            events.append((m.start(), m.end(), "close"))
+        events.sort()
+        result: list[str] = []
+        depth = 0
+        visible_start = 0
+        for start, end, etype in events:
+            if etype == "open":
+                if depth == 0:
+                    result.append(content[visible_start:start])
+                depth += 1
+            else:
+                if depth > 0:
+                    depth -= 1
+                    if depth == 0:
+                        visible_start = end
+                else:
+                    result.append(content[visible_start:start])
+                    visible_start = end
+        if depth == 0:
+            result.append(content[visible_start:])
+        return "".join(result)
 
-        Handles four cases:
-          1. Closed tag pairs (``<think>…</think>``) — the common path when
-             the provider emits complete reasoning blocks.
-          2. Unterminated open tag at a block boundary (start of text or
-             after a newline) — e.g. MiniMax M2.7 / NIM endpoints where the
-             closing tag is dropped.  Everything from the open tag to end
-             of string is stripped.  The block-boundary check mirrors
-             ``gateway/stream_consumer.py``'s filter so models that mention
-             ``<think>`` in prose aren't over-stripped.
-          3. Stray orphan open/close tags that slip through.
-          4. Tag variants: ``<think>``, ``<thinking>``, ``<reasoning>``,
-             ``<REASONING_SCRATCHPAD>``, ``<thought>`` (Gemma 4), all
-             case-insensitive.
-        """
+    def _strip_think_blocks(self, content: str) -> str:
         if not content:
             return ""
-        # 1. Closed tag pairs — case-insensitive for all variants so
-        #    mixed-case tags (<THINK>, <Thinking>) don't slip through to
-        #    the unterminated-tag pass and take trailing content with them.
-        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r'<reasoning>.*?</reasoning>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r'<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r'<thought>.*?</thought>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        # 2. Unterminated reasoning block — open tag at a block boundary
-        #    (start of text, or after a newline) with no matching close.
-        #    Strip from the tag to end of string.  Fixes #8878 / #9568
-        #    (MiniMax M2.7 leaking raw reasoning into assistant content).
-        content = re.sub(
-            r'(?:^|\n)[ \t]*<(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)\b[^>]*>.*$',
-            '',
-            content,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        # 3. Stray orphan open/close tags that slipped through.
-        content = re.sub(
-            r'</?(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)>\s*',
-            '',
-            content,
-            flags=re.IGNORECASE,
-        )
+        _THINK_TAGS = ("think", "thinking", "reasoning", "REASONING_SCRATCHPAD", "thought")
+        for _tag in _THINK_TAGS:
+            content = AIAgent._strip_tag_with_nesting(content, _tag)
+        for _tc_name in ("tool_call", "tool_calls", "tool_result", "function_call", "function_calls"):
+            content = re.sub(rf'<{_tc_name}\b[^>]*>.*?</{_tc_name}>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'(?:(?<=^)|(?<=[\n\r.!?:]))[ \t]*<function\b[^>]*\bname\s*=[^>]*>(?:(?:(?!</function>).)*)</function>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'(?:^|\n)[ \t]*<(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)\b[^>]*>.*$', '', content, flags=re.DOTALL | re.IGNORECASE)
+        for _tag in _THINK_TAGS:
+            _m = re.search(rf'<{_tag}\b[^>]*>', content, re.IGNORECASE)
+            if _m and not re.search(rf'</{_tag}>', content[_m.end():], re.IGNORECASE):
+                if content[_m.end():].strip():
+                    content = content[:_m.start()]
+        content = re.sub(r'</?(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)>\s*', '', content, flags=re.IGNORECASE)
+        content = re.sub(r'</(?:tool_call|tool_calls|tool_result|function_call|function_calls|function)>\s*', '', content, flags=re.IGNORECASE)
         return content
 
     @staticmethod
